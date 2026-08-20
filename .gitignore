@@ -26,3 +26,5 @@ data/interim/*
 # Model binaries over GitHub's comfort threshold
 *.tif
 !data/processed/*.tif
+models/
+!models/.gitkeep

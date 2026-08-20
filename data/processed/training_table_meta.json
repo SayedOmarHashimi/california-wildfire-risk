@@ -1,0 +1,16 @@
+{
+  "n_rows": 20622,
+  "n_positive": 982,
+  "n_negative": 19640,
+  "neg_per_pos": 20,
+  "random_seed": 42,
+  "total_candidate_cell_days": 8307369,
+  "true_prevalence": 0.00011820830397686681,
+  "sampled_prevalence": 0.047619047619047616,
+  "negative_sampling_fraction": 0.0023644455766387963,
+  "train_years": [
+    2016,
+    2020
+  ],
+  "weather_join": "nearest gridMET 4km pixel"
+}

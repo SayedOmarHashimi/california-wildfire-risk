@@ -44,8 +44,8 @@ vintage and licence, and its known limitations.
 | Phase | Description | State |
 |-------|-------------|-------|
 | 1 | Data ingestion, folder structure, data dictionary | **complete** |
-| 2 | Ignition risk model | next |
-| 3 | Fire spread simulation + Camp Fire calibration | not started |
+| 2 | Ignition risk model | **complete** |
+| 3 | Fire spread simulation + Camp Fire calibration | next |
 | 4 | Live FIRMS pipeline | not started |
 | 5 | Web map / interface | not started |
 | 6 | Documentation | not started |
