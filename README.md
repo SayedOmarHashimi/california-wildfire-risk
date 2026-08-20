@@ -35,14 +35,16 @@ built to demonstrate four things end to end:
    tier infrastructure.
 
 Full methodology, data sources, and honest validation results are documented in
-[`docs/`](docs/) and expanded here on completion.
+[`docs/`](docs/) and expanded here on completion. Start with the
+[data dictionary](docs/data_dictionary.md), which records every source, its
+vintage and licence, and its known limitations.
 
 ## Status
 
 | Phase | Description | State |
 |-------|-------------|-------|
-| 1 | Data ingestion, folder structure, data dictionary | in progress |
-| 2 | Ignition risk model | not started |
+| 1 | Data ingestion, folder structure, data dictionary | **complete** |
+| 2 | Ignition risk model | next |
 | 3 | Fire spread simulation + Camp Fire calibration | not started |
 | 4 | Live FIRMS pipeline | not started |
 | 5 | Web map / interface | not started |
