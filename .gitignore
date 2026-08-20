@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+
+# Secrets — NEVER commit the FIRMS MAP_KEY
+.env
+.streamlit/secrets.toml
+
+# Large raw downloads (regenerate with src/ingest scripts)
+data/raw/*
+!data/raw/.gitkeep
+data/interim/*
+!data/interim/.gitkeep
+
+# Processed + live outputs ARE committed (small, and the GH Action writes live/)
+!data/processed/**
+!data/live/**
+
+# Model binaries over GitHub's comfort threshold
+*.tif
+!data/processed/*.tif

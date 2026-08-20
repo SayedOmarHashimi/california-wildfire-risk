@@ -1,0 +1,21 @@
+# Core geospatial
+geopandas==1.1.4
+rasterio==1.5.1
+shapely==2.1.2
+pyproj==3.7.2
+pyogrio==0.13.0
+
+# Data + modeling
+pandas==3.0.5
+numpy==2.5.2
+scipy==1.18.0
+scikit-learn==1.9.0
+
+# HTTP
+requests==2.34.2
+
+# App + map
+streamlit==1.62.0
+folium==0.20.0
+streamlit-folium==0.27.4
+branca==0.8.2
