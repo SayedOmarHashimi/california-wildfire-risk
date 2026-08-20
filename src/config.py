@@ -68,6 +68,12 @@ CAMP_FIRE = {
     "ignition_utc": "2018-11-08T14:15:00Z",  # ~06:15 PST — verify vs CAL FIRE record
 }
 
+# Hourly-wind window for spread calibration. Covers ignition through the main
+# runs; the fire was not contained until 2018-11-25, but growth after 11-12 was
+# slow and does not constrain the spread parameters.
+CAMP_FIRE_WIND_START = "2018-11-08T00:00:00Z"
+CAMP_FIRE_WIND_END = "2018-11-13T00:00:00Z"
+
 # --------------------------------------------------------------------------
 # Live NASA FIRMS feed
 # --------------------------------------------------------------------------
