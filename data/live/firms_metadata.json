@@ -1,0 +1,9 @@
+{
+  "generated_utc": null,
+  "total_detections": 0,
+  "vegetation_fire_detections": 0,
+  "status": "awaiting first scheduled refresh",
+  "note": "Placeholder committed so the app renders before the workflow first runs. Contains no detection data.",
+  "data_is_unverified": true,
+  "not_an_official_source": true
+}

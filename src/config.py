@@ -4,6 +4,7 @@ Every path, CRS, and constant used across ingestion, modeling, simulation, and
 the Streamlit app resolves from here so there is exactly one place to change.
 """
 
+import os
 from pathlib import Path
 
 # --------------------------------------------------------------------------
@@ -81,11 +82,32 @@ CAMP_FIRE_WIND_END = "2018-11-13T00:00:00Z"
 # variable (a GitHub Actions secret in CI). It is never committed.
 FIRMS_MAP_KEY_ENV = "FIRMS_MAP_KEY"
 FIRMS_AREA_API = "https://firms.modaps.eosdis.nasa.gov/api/area/csv"
-FIRMS_SOURCES = ["VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT", "MODIS_NRT"]
+FIRMS_SOURCES = [
+    "VIIRS_SNPP_NRT",
+    "VIIRS_NOAA20_NRT",
+    "VIIRS_NOAA21_NRT",
+    "MODIS_NRT",
+]
 FIRMS_DAY_RANGE = 1          # trailing days of detections to publish
 CALIFORNIA_BBOX_WGS84 = (-124.48, 32.53, -114.13, 42.01)
 LIVE_GEOJSON = LIVE / "firms_california_active.geojson"
 LIVE_METADATA = LIVE / "firms_metadata.json"
+
+# The scheduled workflow publishes to an orphan branch rather than main, so
+# that pushing fresh data every 15 minutes does not trigger a Streamlit
+# Community Cloud redeploy each time. The app reads the raw URL directly and
+# caches it, so new data appears without any redeploy at all.
+GITHUB_OWNER = os.environ.get("GH_OWNER", "sayedomarhashimi")
+GITHUB_REPO = os.environ.get("GH_REPO", "ca-wildfire-sim")
+LIVE_DATA_BRANCH = "live-data"
+LIVE_RAW_BASE = (
+    f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/"
+    f"{LIVE_DATA_BRANCH}/data/live"
+)
+
+# Cache TTL for the app, and the age past which data is shown as stale.
+LIVE_CACHE_TTL_S = 900          # 15 min, matching the refresh cadence
+LIVE_STALE_AFTER_MIN = 75       # allows one missed run before warning
 
 # --------------------------------------------------------------------------
 # Disclaimer — single source of truth for the README and the map banner

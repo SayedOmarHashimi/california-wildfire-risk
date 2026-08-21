@@ -46,8 +46,8 @@ vintage and licence, and its known limitations.
 | 1 | Data ingestion, folder structure, data dictionary | **complete** |
 | 2 | Ignition risk model | **complete** |
 | 3 | Fire spread simulation + Camp Fire calibration | **complete** |
-| 4 | Live FIRMS pipeline | next |
-| 5 | Web map / interface | not started |
+| 4 | Live FIRMS pipeline | **complete** |
+| 5 | Web map / interface | next |
 | 6 | Documentation | not started |
 
 ## Repository layout

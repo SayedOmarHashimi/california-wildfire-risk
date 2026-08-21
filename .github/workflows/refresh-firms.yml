@@ -1,0 +1,111 @@
+name: Refresh FIRMS active fire data
+
+# Pulls current NASA FIRMS detections for California and publishes them to the
+# `live-data` branch.
+#
+# WHY A SEPARATE BRANCH: Streamlit Community Cloud redeploys the app on every
+# push to its tracked branch. Committing fresh data to `main` every 15 minutes
+# would trigger ~96 redeploys a day, each with a short outage, and would grow
+# `main`'s history without bound. Publishing to an orphan `live-data` branch
+# that is force-pushed to a single commit keeps `main` clean, keeps repo size
+# flat, and lets the app fetch the raw URL on its own cache schedule instead.
+
+on:
+  schedule:
+    # Every 15 minutes. GitHub does not guarantee punctual scheduling and will
+    # delay or drop runs under load, so treat this as "roughly every 15 min".
+    - cron: '*/15 * * * *'
+  workflow_dispatch:        # allows a manual run from the Actions tab
+  push:
+    branches: [main]
+    paths:
+      - 'src/live/**'
+      - '.github/workflows/refresh-firms.yml'
+
+# Never let two refreshes race to push the same branch.
+concurrency:
+  group: firms-refresh
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install minimal dependencies
+        run: pip install -r requirements-live.txt
+
+      - name: Fetch FIRMS detections
+        env:
+          # Set this in Settings > Secrets and variables > Actions.
+          # Get a free key at https://firms.modaps.eosdis.nasa.gov/api/area/
+          FIRMS_MAP_KEY: ${{ secrets.FIRMS_MAP_KEY }}
+        run: python -m src.live.fetch_firms
+
+      - name: Publish to live-data branch
+        run: |
+          set -euo pipefail
+          if [ ! -s data/live/firms_california_active.geojson ]; then
+            echo "No output produced; refusing to publish." >&2
+            exit 1
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Stage the two output files, then rebuild the branch as a single
+          # orphan commit so history never accumulates.
+          mkdir -p /tmp/live
+          cp data/live/firms_california_active.geojson /tmp/live/
+          cp data/live/firms_metadata.json /tmp/live/
+
+          git checkout --orphan live-data-tmp
+          git rm -rf --cached . >/dev/null 2>&1 || true
+          rm -rf $(git ls-files) 2>/dev/null || true
+
+          mkdir -p data/live
+          cp /tmp/live/* data/live/
+          cat > README.md <<'NOTE'
+          # live-data branch
+
+          Machine-generated. Do not edit or open pull requests against it — it
+          is force-pushed as a single commit by the FIRMS refresh workflow.
+
+          `data/live/firms_california_active.geojson` holds UNVERIFIED NASA
+          FIRMS satellite thermal detections. These are **not** confirmed fire
+          incidents and **not** an official feed. They include false positives
+          and lag real conditions.
+
+          Official incident information: https://www.fire.ca.gov/incidents/
+          In an emergency, call 911.
+          NOTE
+
+          git add -f data/live README.md
+          git commit -q -m "FIRMS refresh $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push -f origin live-data-tmp:live-data
+          echo "Published $(wc -c < data/live/firms_california_active.geojson) bytes"
+
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f data/live/firms_metadata.json ]; then
+            {
+              echo '### FIRMS refresh'
+              echo '```json'
+              cat data/live/firms_metadata.json
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi

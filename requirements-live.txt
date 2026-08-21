@@ -1,0 +1,6 @@
+# Minimal dependencies for the scheduled FIRMS refresh action.
+# Deliberately excludes geopandas/rasterio/streamlit: the refresh job only
+# parses CSV and writes GeoJSON, and installing the geo stack would turn a
+# ~20 second job into a multi-minute one, 96 times a day.
+pandas==3.0.5
+requests==2.34.2
