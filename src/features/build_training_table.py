@@ -37,10 +37,9 @@ import json
 import geopandas as gpd
 import numpy as np
 import pandas as pd
-import rasterio
 import xarray as xr
-from scipy import ndimage
 
+from src.features.grid import distance_to_developed
 from src.config import (
     CRS_ALBERS,
     INTERIM,
@@ -61,31 +60,6 @@ RANDOM_SEED = 42
 # Weather fields taken as-is on the ignition/sample day.
 SAME_DAY = ["vs", "u_wind", "v_wind", "tmmx_c", "tmmn_c", "rmin", "rmax",
             "pr", "erc", "bi", "fm100", "fm1000", "vpd"]
-
-
-def distance_to_developed(grid: gpd.GeoDataFrame) -> np.ndarray:
-    """Kilometres from each cell centroid to the nearest developed 30 m pixel.
-
-    Two thirds of Butte's recorded ignitions are human-caused, so proximity to
-    development is among the strongest available predictors. LANDFIRE fuel code
-    91 (NB1, urban/developed) supplies this for free -- no extra dataset, and
-    no OpenStreetMap rate limiting.
-    """
-    with rasterio.open(INTERIM / "landfire" / "fbfm40.tif") as src:
-        fuel = src.read(1)
-        transform = src.transform
-        raster_crs = src.crs
-    developed = fuel == 91
-    if not developed.any():
-        return np.full(len(grid), np.nan)
-    # EDT over the non-developed pixels gives distance in pixel units.
-    dist_px = ndimage.distance_transform_edt(~developed)
-    pts = grid.to_crs(raster_crs).geometry.centroid
-    inv = ~transform
-    cols, rows = inv * (pts.x.values, pts.y.values)
-    rows = np.clip(rows.astype(int), 0, dist_px.shape[0] - 1)
-    cols = np.clip(cols.astype(int), 0, dist_px.shape[1] - 1)
-    return dist_px[rows, cols] * 30.0 / 1000.0
 
 
 def antecedent(cube: dict, days: np.ndarray) -> dict:

@@ -31,6 +31,7 @@ import numpy as np
 import pandas as pd
 import rasterio
 from rasterio.features import rasterize
+from scipy import ndimage
 from shapely import make_valid
 from shapely.geometry import box
 
@@ -58,6 +59,35 @@ SCALE = {
     "canopy_bulk_density": 0.01,  # kg/m3 x100 -> kg/m3
     "canopy_cover": 1.0,         # already percent
 }
+
+
+def distance_to_developed(grid: gpd.GeoDataFrame) -> np.ndarray:
+    """Kilometres from each cell centroid to the nearest developed 30 m pixel.
+
+    Two thirds of Butte's recorded ignitions are human-caused, so proximity to
+    development is among the strongest available predictors. LANDFIRE fuel code
+    91 (NB1, urban/developed) supplies this for free -- no extra dataset and no
+    OpenStreetMap rate limiting.
+
+    Computed here, at grid-build time, so the value is written into the
+    committed grid file. The source raster lives in gitignored data/interim
+    and is absent on a fresh deploy, so anything that recomputed this at
+    runtime would break in production.
+    """
+    with rasterio.open(LANDFIRE_DIR / "fbfm40.tif") as src:
+        fuel = src.read(1)
+        transform = src.transform
+        raster_crs = src.crs
+    developed = fuel == 91
+    if not developed.any():
+        return np.full(len(grid), np.nan)
+    dist_px = ndimage.distance_transform_edt(~developed)
+    pts = grid.to_crs(raster_crs).geometry.centroid
+    inv = ~transform
+    cols, rows = inv * (pts.x.values, pts.y.values)
+    rows = np.clip(rows.astype(int), 0, dist_px.shape[0] - 1)
+    cols = np.clip(cols.astype(int), 0, dist_px.shape[1] - 1)
+    return dist_px[rows, cols] * 30.0 / 1000.0
 
 
 def build_grid() -> gpd.GeoDataFrame:
@@ -248,6 +278,9 @@ def aggregate(grid: gpd.GeoDataFrame, idx: np.ndarray) -> gpd.GeoDataFrame:
     grid["fuel_model_majority"] = np.where(tally.max(axis=1) > 0, codes[best], -1)
 
     grid["n_pixels"] = np.nan_to_num(counts, nan=0).astype(int)
+
+    print("  computing distance to developed...")
+    grid["dist_to_developed_km"] = distance_to_developed(grid)
     return grid
 
 
@@ -263,7 +296,8 @@ def main() -> gpd.GeoDataFrame:
 
     print(f"\n  cells: {len(grid):,}   features: {len(grid.columns) - 1}")
     show = ["elev_mean", "elev_range", "slope_mean", "pct_slope_over_30",
-            "northness", "canopy_cover", "canopy_height", "pct_burnable"]
+            "northness", "canopy_cover", "canopy_height", "pct_burnable",
+            "dist_to_developed_km"]
     print(grid[show].describe().loc[["mean", "min", "max"]].round(2).to_string())
     miss = grid[show].isna().sum()
     if miss.any():

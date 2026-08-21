@@ -28,3 +28,8 @@ data/interim/*
 !data/processed/*.tif
 models/
 !models/.gitkeep
+
+# Trained model is small (~500KB) and MUST be committed: the deployed app
+# loads it, and it cannot be rebuilt on Streamlit Cloud without the gitignored
+# raw data.
+!models/*.joblib

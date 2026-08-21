@@ -47,8 +47,8 @@ vintage and licence, and its known limitations.
 | 2 | Ignition risk model | **complete** |
 | 3 | Fire spread simulation + Camp Fire calibration | **complete** |
 | 4 | Live FIRMS pipeline | **complete** |
-| 5 | Web map / interface | next |
-| 6 | Documentation | not started |
+| 5 | Web map / interface | **complete** |
+| 6 | Documentation | next |
 
 ## Repository layout
 
