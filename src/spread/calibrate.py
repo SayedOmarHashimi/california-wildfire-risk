@@ -159,6 +159,9 @@ def write_report(best, m, iou_full, df, dom, observed):
 > emergency agency. This is a simplified demonstration model. It is **not** a
 > prediction of how any real fire behaved or will behave, and must never inform
 > an evacuation or safety decision.
+>
+> Official incident information: <https://www.fire.ca.gov/incidents/>.
+> In an emergency, call 911.
 
 ## What is being calibrated
 

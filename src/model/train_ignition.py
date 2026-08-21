@@ -220,6 +220,9 @@ def write_report(sp, spf, yr, yrf, baselines, imp, meta, cp, feats):
 > **Unofficial student/portfolio project.** Not affiliated with CAL FIRE or any
 > emergency agency. These numbers describe a modeling exercise and must not be
 > used to assess real wildfire risk or inform any safety decision.
+>
+> Official incident information: <https://www.fire.ca.gov/incidents/>.
+> In an emergency, call 911.
 
 ## Setup
 
