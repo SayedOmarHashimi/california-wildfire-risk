@@ -184,6 +184,10 @@ streamlit run app/streamlit_app.py
 
 The app runs from committed data alone — no downloads needed.
 
+Developed and verified on **Python 3.14**. On Streamlit Community Cloud the
+Python version is chosen in *Advanced settings* at deploy time — that dropdown
+is authoritative, not `runtime.txt`, which is kept only so the two agree.
+
 ### Rebuilding from raw sources
 
 ```bash
