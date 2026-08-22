@@ -175,7 +175,8 @@ These are load-bearing, not boilerplate.
 ## Running it
 
 ```bash
-git clone <your-repo-url> && cd ca-wildfire-sim
+git clone https://github.com/SayedOmarHashimi/california-wildfire-risk.git
+cd california-wildfire-risk
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 streamlit run app/streamlit_app.py

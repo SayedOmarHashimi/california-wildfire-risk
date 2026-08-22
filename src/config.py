@@ -97,8 +97,8 @@ LIVE_METADATA = LIVE / "firms_metadata.json"
 # that pushing fresh data every 15 minutes does not trigger a Streamlit
 # Community Cloud redeploy each time. The app reads the raw URL directly and
 # caches it, so new data appears without any redeploy at all.
-GITHUB_OWNER = os.environ.get("GH_OWNER", "sayedomarhashimi")
-GITHUB_REPO = os.environ.get("GH_REPO", "ca-wildfire-sim")
+GITHUB_OWNER = os.environ.get("GH_OWNER", "SayedOmarHashimi")
+GITHUB_REPO = os.environ.get("GH_REPO", "california-wildfire-risk")
 LIVE_DATA_BRANCH = "live-data"
 LIVE_RAW_BASE = (
     f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/"
