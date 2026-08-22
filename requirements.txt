@@ -1,3 +1,9 @@
+# Runtime dependencies for the deployed Streamlit app.
+#
+# Verified by installing THIS FILE ALONE into a clean virtualenv and cold-
+# starting the app -- not by checking a development environment that had
+# extra packages installed along the way.
+
 # Core geospatial
 geopandas==1.1.4
 rasterio==1.5.1
@@ -9,7 +15,15 @@ pyogrio==0.13.0
 pandas==3.0.5
 numpy==2.5.2
 scipy==1.18.0
-scikit-learn==1.9.0
+scikit-learn==1.9.0      # also required to unpickle the saved model
+joblib==1.5.3            # model loading
+
+# netCDF weather cubes.
+# netCDF4 is not imported directly, but xarray needs it as the engine: the
+# weather file is netCDF4/HDF5 with zlib compression, which scipy's netCDF3
+# backend cannot read.
+xarray==2026.7.0
+netCDF4==1.7.4
 
 # HTTP
 requests==2.34.2
@@ -19,3 +33,4 @@ streamlit==1.62.0
 folium==0.20.0
 streamlit-folium==0.27.4
 branca==0.8.2
+pillow==12.3.0           # risk/spread image overlays in app/_render.py
