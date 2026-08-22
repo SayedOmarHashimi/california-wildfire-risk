@@ -28,6 +28,7 @@ import io
 import json
 import os
 import sys
+import time
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -43,7 +44,19 @@ from src.config import (
     LIVE_METADATA,
 )
 
-TIMEOUT = 120
+# (connect, read). A dead host should be discovered in seconds, not two
+# minutes: a 120s flat timeout meant one NASA outage burned 8 minutes of
+# runner time doing nothing but waiting, four times over.
+TIMEOUT = (15, 60)
+RETRIES = 3
+BACKOFF_S = 4
+
+# If every source fails but the already-published data is younger than this,
+# the run warns and exits 0 instead of failing. FIRMS has brief outages, the
+# publish step is skipped so good data is never overwritten, and a red X on
+# every blip trains you to ignore the alerts that matter.
+TOLERATE_FAILURE_IF_FRESHER_THAN_H = 3
+
 USER_AGENT = "ca-wildfire-sim/0.1 (student portfolio project)"
 
 # VIIRS reports confidence as a letter, MODIS as 0-100. Low-confidence
@@ -60,8 +73,43 @@ def _redact(text: str, key: str) -> str:
 def fetch_source(source: str, key: str, bbox, day_range: int) -> pd.DataFrame:
     west, south, east, north = bbox
     url = f"{FIRMS_AREA_API}/{key}/{source}/{west},{south},{east},{north}/{day_range}"
-    r = requests.get(url, timeout=TIMEOUT, headers={"User-Agent": USER_AGENT})
-    r.raise_for_status()
+
+    # Retry transient network failures. FIRMS is a free public service and
+    # goes briefly unreachable; a single blip should not cost a whole refresh.
+    last = None
+    for attempt in range(1, RETRIES + 1):
+        try:
+            r = requests.get(url, timeout=TIMEOUT,
+                             headers={"User-Agent": USER_AGENT})
+            r.raise_for_status()
+            break
+        except requests.HTTPError as exc:
+            # 4xx is a client error -- a bad MAP_KEY, a malformed bbox. It will
+            # never succeed on retry, so fail fast with a clear message instead
+            # of burning three attempts per source on it. 5xx falls through to
+            # the transient path below.
+            code = exc.response.status_code if exc.response is not None else None
+            if code is not None and 400 <= code < 500:
+                hint = " (check the FIRMS_MAP_KEY secret)" if code in (400, 401, 403) else ""
+                err = RuntimeError(f"HTTP {code}{hint}")
+                err.permanent = True   # config error, not a transient outage
+                raise err from None
+            last = exc
+            if attempt < RETRIES:
+                wait = BACKOFF_S * attempt
+                print(f"    {source}: HTTP {code}, retry "
+                      f"{attempt}/{RETRIES - 1} in {wait}s")
+                time.sleep(wait)
+        except requests.RequestException as exc:
+            last = exc
+            if attempt < RETRIES:
+                wait = BACKOFF_S * attempt
+                print(f"    {source}: {type(exc).__name__}, retry "
+                      f"{attempt}/{RETRIES - 1} in {wait}s")
+                time.sleep(wait)
+    else:
+        raise RuntimeError(f"{type(last).__name__} after {RETRIES} attempts")
+
     body = r.text
     if body.lstrip().lower().startswith("invalid"):
         raise RuntimeError(f"{source}: {_redact(body.strip()[:120], key)}")
@@ -165,12 +213,37 @@ def main() -> int:
             print(f"  {source:<20} {len(df):>6,} detections")
         except Exception as exc:
             # One dead sensor must not fail the whole refresh.
-            status[source] = {"ok": False, "error": _redact(str(exc)[:200], key)}
+            status[source] = {"ok": False, "error": _redact(str(exc)[:200], key),
+                              "permanent": bool(getattr(exc, "permanent", False))}
             print(f"  {source:<20} FAILED: {status[source]['error']}")
 
     if not any(s.get("ok") for s in status.values()):
-        print("ERROR: every FIRMS source failed; leaving existing file intact.",
+        print("Every FIRMS source failed; leaving the existing file intact.",
               file=sys.stderr)
+        # A permanent failure (4xx: bad key, bad request) will never self-heal,
+        # so it must fail the run however fresh the published data is.
+        # Tolerating it would hide a broken key until the data silently aged out.
+        if any(v.get("permanent") for v in status.values()):
+            print("Failure is a client error, not a transient outage. "
+                  "Failing the run.", file=sys.stderr)
+            return 1
+
+        # Otherwise decide based on how old the published data actually is.
+        try:
+            from src.live.load import load_live_detections
+            _, _, live_status = load_live_detections()
+            age_min = live_status.get("age_minutes")
+        except Exception:
+            age_min = None
+
+        if age_min is not None and age_min < TOLERATE_FAILURE_IF_FRESHER_THAN_H * 60:
+            print(f"Published data is {age_min:.0f} min old (< "
+                  f"{TOLERATE_FAILURE_IF_FRESHER_THAN_H} h); treating this as a "
+                  f"transient outage and exiting 0.", file=sys.stderr)
+            return 0
+        print(f"Published data age: "
+              f"{'unknown' if age_min is None else f'{age_min:.0f} min'}. "
+              f"Failing the run so the outage is visible.", file=sys.stderr)
         return 1
 
     df = normalise(frames)

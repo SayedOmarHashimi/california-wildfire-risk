@@ -82,10 +82,30 @@ python -m tests.test_firms_pipeline
 2. **Cron timing is best-effort.** GitHub delays or drops scheduled runs under
    load, so `*/15` means "roughly every 15 minutes", not exactly. The app
    tolerates one missed run before showing data as stale (75-minute threshold).
-3. **Partial sensor failures are survivable.** If one of the four FIRMS
-   sources errors, the run continues with the rest. Only if *all* sources fail
-   does the job exit non-zero, leaving the previous file untouched rather than
-   overwriting good data with nothing.
+3. **Failure handling is graded.** Observed in production on 2026-08-22, when
+   NASA FIRMS was briefly unreachable and all four sources failed.
+
+   | Situation | Publish | Exit | Rationale |
+   |---|---|---|---|
+   | Some sources fail | yes, with the rest | 0 | Partial data beats none |
+   | All fail, published data < 3 h old | skipped | 0 | Transient outage; good data intact |
+   | All fail, published data ≥ 3 h old | skipped | 1 | Now worth an alert |
+   | Any 4xx (bad key, bad request) | skipped | 1 | Config error, never self-heals |
+
+   The publish step is skipped whenever the fetch fails, so a failed run can
+   never overwrite good data with nothing.
+
+   Transient errors (connection failures, 5xx) are retried three times with
+   backoff. 4xx errors are **not** retried — they will not succeed on a second
+   attempt, and failing fast gives a clear message (`HTTP 400 (check the
+   FIRMS_MAP_KEY secret)`) instead of burning three attempts per source.
+
+   Timeouts are (15 s connect, 60 s read). A flat 120 s previously meant one
+   outage consumed 8 minutes of runner time waiting on a dead host.
+
+   The distinction between transient and permanent matters: tolerating a 4xx
+   because the published data still looked fresh would hide a broken key until
+   the data silently aged out days later.
 4. **Free tier throughout.** Public-repo Actions minutes are unlimited; the job
    installs only `pandas` and `requests` and takes well under a minute. There
    is no database, no paid tiles, no paid hosting anywhere in this path.
