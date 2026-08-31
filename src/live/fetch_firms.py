@@ -36,7 +36,7 @@ import requests
 
 from src.config import (
     CALIFORNIA_BBOX_WGS84,
-    FIRMS_AREA_API,
+    FIRMS_AREA_APIS,
     FIRMS_DAY_RANGE,
     FIRMS_MAP_KEY_ENV,
     FIRMS_SOURCES,
@@ -70,24 +70,65 @@ def _redact(text: str, key: str) -> str:
     return text.replace(key, "***REDACTED***") if key else text
 
 
-def fetch_source(source: str, key: str, bbox, day_range: int) -> pd.DataFrame:
-    west, south, east, north = bbox
-    url = f"{FIRMS_AREA_API}/{key}/{source}/{west},{south},{east},{north}/{day_range}"
+class HostPool:
+    """Tracks which FIRMS base URLs are still worth trying during this run.
 
-    # Retry transient network failures. FIRMS is a free public service and
-    # goes briefly unreachable; a single blip should not cost a whole refresh.
+    All four sources live behind one hostname, so when that host is down every
+    source fails the same way. Without shared state each source rediscovers the
+    outage from scratch -- four sources x three attempts x a 15 s connect
+    timeout is minutes of a ten-minute job spent waiting on a host already
+    known to be unreachable. A base that fails at the connection or 5xx level
+    is retired for the rest of the run; once every base is retired the
+    remaining sources fail immediately instead of re-probing.
+    """
+
+    def __init__(self, bases):
+        self._bases = list(bases)
+        self.dead: dict[str, str] = {}
+
+    def live(self) -> list[str]:
+        return [b for b in self._bases if b not in self.dead]
+
+    def retire(self, base: str, reason: str) -> None:
+        self.dead[base] = reason
+
+    def prefer(self, base: str) -> None:
+        """Move a base that just worked to the front, so the remaining
+        sources go straight to it instead of re-testing a slower one."""
+        if self._bases and self._bases[0] != base:
+            self._bases.remove(base)
+            self._bases.insert(0, base)
+
+    @staticmethod
+    def host(base: str) -> str:
+        return base.split("/")[2] if "//" in base else base
+
+
+def _get_once(base: str, source: str, key: str, bbox, day_range: int):
+    west, south, east, north = bbox
+    url = f"{base}/{key}/{source}/{west},{south},{east},{north}/{day_range}"
+    r = requests.get(url, timeout=TIMEOUT, headers={"User-Agent": USER_AGENT})
+    r.raise_for_status()
+    return r
+
+
+def _fetch_from_base(base: str, source: str, key: str, bbox, day_range: int):
+    """Fetch `source` from one base URL, retrying transient failures.
+
+    Raises with `.permanent` set for a client error (never retried, never
+    failed over -- a rejected MAP_KEY is rejected on every host too).
+    """
+    label = f"{source}@{HostPool.host(base)}"
     last = None
     for attempt in range(1, RETRIES + 1):
         try:
-            r = requests.get(url, timeout=TIMEOUT,
-                             headers={"User-Agent": USER_AGENT})
-            r.raise_for_status()
-            break
+            return _get_once(base, source, key, bbox, day_range)
         except requests.HTTPError as exc:
             # 4xx is a client error -- a bad MAP_KEY, a malformed bbox. It will
-            # never succeed on retry, so fail fast with a clear message instead
-            # of burning three attempts per source on it. 5xx falls through to
-            # the transient path below.
+            # never succeed on retry and will not succeed on the mirror either,
+            # so fail fast with a clear message instead of burning three
+            # attempts per source per host on it. 5xx falls through to the
+            # transient path below.
             code = exc.response.status_code if exc.response is not None else None
             if code is not None and 400 <= code < 500:
                 hint = " (check the FIRMS_MAP_KEY secret)" if code in (400, 401, 403) else ""
@@ -97,19 +138,20 @@ def fetch_source(source: str, key: str, bbox, day_range: int) -> pd.DataFrame:
             last = exc
             if attempt < RETRIES:
                 wait = BACKOFF_S * attempt
-                print(f"    {source}: HTTP {code}, retry "
+                print(f"    {label}: HTTP {code}, retry "
                       f"{attempt}/{RETRIES - 1} in {wait}s")
                 time.sleep(wait)
         except requests.RequestException as exc:
             last = exc
             if attempt < RETRIES:
                 wait = BACKOFF_S * attempt
-                print(f"    {source}: {type(exc).__name__}, retry "
+                print(f"    {label}: {type(exc).__name__}, retry "
                       f"{attempt}/{RETRIES - 1} in {wait}s")
                 time.sleep(wait)
-    else:
-        raise RuntimeError(f"{type(last).__name__} after {RETRIES} attempts")
+    raise RuntimeError(f"{type(last).__name__} after {RETRIES} attempts")
 
+
+def _parse(r, source: str, key: str) -> pd.DataFrame:
     body = r.text
     if body.lstrip().lower().startswith("invalid"):
         raise RuntimeError(f"{source}: {_redact(body.strip()[:120], key)}")
@@ -118,6 +160,43 @@ def fetch_source(source: str, key: str, bbox, day_range: int) -> pd.DataFrame:
     df = pd.read_csv(io.StringIO(body))
     df["source"] = source
     return df
+
+
+def fetch_source(source: str, key: str, bbox, day_range: int,
+                 hosts: HostPool | None = None) -> pd.DataFrame:
+    """Fetch one FIRMS source, failing over to the alternate host if needed."""
+    hosts = HostPool(FIRMS_AREA_APIS) if hosts is None else hosts
+
+    bases = hosts.live()
+    if not bases:
+        # Every base already failed for an earlier source this run.
+        err = RuntimeError("all FIRMS hosts unreachable: "
+                           + "; ".join(f"{HostPool.host(b)} {why}"
+                                       for b, why in hosts.dead.items()))
+        err.host_outage = True
+        raise err
+
+    last = None
+    for base in bases:
+        try:
+            r = _fetch_from_base(base, source, key, bbox, day_range)
+        except RuntimeError as exc:
+            if getattr(exc, "permanent", False):
+                raise
+            hosts.retire(base, str(exc))
+            last = exc
+            remaining = hosts.live()
+            if remaining:
+                print(f"    {source}: {HostPool.host(base)} failed ({exc}), "
+                      f"falling back to {HostPool.host(remaining[0])}")
+            continue
+        hosts.prefer(base)
+        return _parse(r, source, key)
+
+    err = RuntimeError(f"{last} (tried "
+                       + ", ".join(HostPool.host(b) for b in bases) + ")")
+    err.host_outage = True
+    raise err
 
 
 def normalise(frames: list[pd.DataFrame]) -> pd.DataFrame:
@@ -204,22 +283,35 @@ def main() -> int:
 
     print(f"Fetching FIRMS detections for California "
           f"(last {FIRMS_DAY_RANGE} day(s))")
+    # Shared across sources so one host outage is discovered once, not four
+    # times, and so a successful failover carries over to the next source.
+    hosts = HostPool(FIRMS_AREA_APIS)
     frames, status = [], {}
     for source in FIRMS_SOURCES:
         try:
-            df = fetch_source(source, key, CALIFORNIA_BBOX_WGS84, FIRMS_DAY_RANGE)
+            df = fetch_source(source, key, CALIFORNIA_BBOX_WGS84,
+                              FIRMS_DAY_RANGE, hosts)
             frames.append(df)
             status[source] = {"ok": True, "rows": int(len(df))}
             print(f"  {source:<20} {len(df):>6,} detections")
         except Exception as exc:
             # One dead sensor must not fail the whole refresh.
             status[source] = {"ok": False, "error": _redact(str(exc)[:200], key),
-                              "permanent": bool(getattr(exc, "permanent", False))}
+                              "permanent": bool(getattr(exc, "permanent", False)),
+                              "host_outage": bool(getattr(exc, "host_outage", False))}
             print(f"  {source:<20} FAILED: {status[source]['error']}")
 
     if not any(s.get("ok") for s in status.values()):
         print("Every FIRMS source failed; leaving the existing file intact.",
               file=sys.stderr)
+        if hosts.dead and not hosts.live():
+            # Not a per-sensor problem: no FIRMS host answered at all. Name the
+            # hosts so the log distinguishes "NASA is down" from "we are broken".
+            print("No FIRMS host answered ("
+                  + ", ".join(HostPool.host(b) for b in hosts.dead)
+                  + "). If this persists, check "
+                  "https://firms.modaps.eosdis.nasa.gov/notifications/firms/"
+                  "outages.html", file=sys.stderr)
         # A permanent failure (4xx: bad key, bad request) will never self-heal,
         # so it must fail the run however fresh the published data is.
         # Tolerating it would hide a broken key until the data silently aged out.
@@ -262,6 +354,7 @@ def main() -> int:
         "day_range": FIRMS_DAY_RANGE,
         "bbox": list(CALIFORNIA_BBOX_WGS84),
         "sources": status,
+        "firms_host": HostPool.host(hosts.live()[0]) if hosts.live() else None,
         "confidence_mix": (df.confidence_label.value_counts().to_dict()
                            if len(df) else {}),
         "latest_detection_utc": (df.acq_utc.max().strftime("%Y-%m-%dT%H:%M:%SZ")

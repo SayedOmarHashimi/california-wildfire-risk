@@ -81,7 +81,15 @@ CAMP_FIRE_WIND_END = "2018-11-13T00:00:00Z"
 # The MAP_KEY is supplied at runtime via the FIRMS_MAP_KEY environment
 # variable (a GitHub Actions secret in CI). It is never committed.
 FIRMS_MAP_KEY_ENV = "FIRMS_MAP_KEY"
-FIRMS_AREA_API = "https://firms.modaps.eosdis.nasa.gov/api/area/csv"
+# Every source below is served by the same host, so a host-level outage takes
+# all four down at once rather than degrading one sensor. NASA publishes
+# firms2 as the alternate during FIRMS maintenance windows, so it is tried as
+# a fallback before the run gives up. Primary first; order matters.
+FIRMS_AREA_APIS = [
+    "https://firms.modaps.eosdis.nasa.gov/api/area/csv",
+    "https://firms2.modaps.eosdis.nasa.gov/api/area/csv",
+]
+FIRMS_AREA_API = FIRMS_AREA_APIS[0]   # kept for docs and one-off scripts
 FIRMS_SOURCES = [
     "VIIRS_SNPP_NRT",
     "VIIRS_NOAA20_NRT",
