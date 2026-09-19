@@ -1,18 +1,27 @@
 """Validate the FIRMS transform pipeline without needing a MAP_KEY.
 
-The keyed HTTP call is the only part that cannot run here; everything
-downstream of it -- parsing, confidence normalisation, deduplication, and
-GeoJSON construction -- is exercised against real archive rows.
+The keyed HTTP call is the only part that cannot run for real here;
+everything downstream of it -- parsing, confidence normalisation,
+deduplication, and GeoJSON construction -- is exercised against real archive
+rows, and the host-failover logic is exercised against a stubbed requests.get.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import tempfile
+from pathlib import Path
 
 import pandas as pd
 
+import requests
+
 from src.config import RAW
-from src.live.fetch_firms import normalise, to_geojson, _redact
+import src.live.fetch_firms as ff
+import src.live.load as load_mod
+from src.live.fetch_firms import HostPool, fetch_source, normalise, to_geojson, _redact
 
 ARCHIVE = RAW / "firms_viirs_snpp_2018_us.csv"
 
@@ -23,8 +32,212 @@ def load_sample(n=4000) -> pd.DataFrame:
     return df
 
 
-def main():
-    print("FIRMS pipeline self-test (no MAP_KEY required)")
+
+# ---------------------------------------------------------------------------
+# Host failover
+# ---------------------------------------------------------------------------
+PRIMARY, MIRROR = "https://primary.test/api/area/csv", "https://mirror.test/api/area/csv"
+BBOX = (-124.0, 32.0, -114.0, 42.0)
+
+CSV = ("latitude,longitude,acq_date,acq_time,confidence,frp,type\n"
+       "39.8,-121.4,2026-08-31,1200,h,12.5,0\n")
+
+
+class FakeResponse:
+    def __init__(self, text="", status=200):
+        self.text = text
+        self.status_code = status
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.HTTPError(response=self)
+
+
+def stub_requests(behaviour):
+    """Patch fetch_firms' requests.get with a host -> outcome mapping.
+
+    An outcome is either an exception instance to raise or a FakeResponse.
+    Records every host actually contacted so the tests can assert that a
+    retired host is not re-probed.
+    """
+    calls = []
+
+    def fake_get(url, **kwargs):
+        host = url.split("/")[2]
+        calls.append(host)
+        out = behaviour[host]
+        if isinstance(out, Exception):
+            raise out
+        return out
+
+    ff.requests.get = fake_get
+    return calls
+
+
+def check_failover():
+    """A dead primary must fail over to the mirror rather than fail the run."""
+    calls = stub_requests({
+        "primary.test": requests.ConnectionError("connection refused"),
+        "mirror.test": FakeResponse(CSV),
+    })
+    hosts = HostPool([PRIMARY, MIRROR])
+    df = fetch_source("VIIRS_SNPP_NRT", "KEY", BBOX, 1, hosts)
+    assert len(df) == 1, f"expected the mirror's row, got {len(df)}"
+    assert df["source"].iloc[0] == "VIIRS_SNPP_NRT"
+    assert PRIMARY in hosts.dead, "dead primary was not retired"
+    assert hosts.live()[0] == MIRROR, "working mirror was not preferred"
+    print(f"  failover: primary refused -> mirror served {len(df)} row "
+          f"({calls.count('primary.test')} primary attempts)")
+
+
+def check_dead_host_probed_once():
+    """The second source must not re-probe a host already known to be dead.
+
+    This is the bug behind the reported log: four sources each burned three
+    attempts against the same unreachable host.
+    """
+    calls = stub_requests({
+        "primary.test": requests.ConnectionError("connection refused"),
+        "mirror.test": requests.ConnectionError("connection refused"),
+    })
+    hosts = HostPool([PRIMARY, MIRROR])
+
+    failures = []
+    for source in ("VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT", "MODIS_NRT"):
+        try:
+            fetch_source(source, "KEY", BBOX, 1, hosts)
+        except RuntimeError as exc:
+            failures.append(exc)
+
+    assert len(failures) == 3, "every source should fail when no host answers"
+    assert all(getattr(e, "host_outage", False) for e in failures), \
+        "a total host outage must be flagged as such, not as a sensor fault"
+    # Only the first source probes; sources 2 and 3 short-circuit.
+    assert len(calls) == 2 * ff.RETRIES, \
+        f"expected {2 * ff.RETRIES} probes total, got {len(calls)}"
+    print(f"  short-circuit: 3 sources, 2 dead hosts, {len(calls)} HTTP "
+          f"attempts total (was {3 * 2 * ff.RETRIES} before)")
+
+
+def check_bad_key_does_not_fail_over():
+    """A rejected MAP_KEY is rejected on every host; retrying the mirror only
+    hides a config error behind what looks like an outage."""
+    calls = stub_requests({
+        "primary.test": FakeResponse("", status=401),
+        "mirror.test": FakeResponse(CSV),
+    })
+    hosts = HostPool([PRIMARY, MIRROR])
+    try:
+        fetch_source("VIIRS_SNPP_NRT", "KEY", BBOX, 1, hosts)
+    except RuntimeError as exc:
+        assert getattr(exc, "permanent", False), "401 must be permanent"
+        assert not getattr(exc, "host_outage", False), \
+            "a bad key must not be reported as a host outage"
+        assert "FIRMS_MAP_KEY" in str(exc), "401 should name the secret"
+    else:
+        raise AssertionError("a 401 must not be swallowed")
+    assert calls == ["primary.test"], f"401 should not be retried: {calls}"
+    assert MIRROR in hosts.live(), "a bad key must not retire the mirror"
+    print("  bad key: failed fast on 401, no retry, no failover")
+
+
+def check_5xx_fails_over():
+    """A 5xx is transient at the host level, so the mirror is worth trying."""
+    calls = stub_requests({
+        "primary.test": FakeResponse("", status=503),
+        "mirror.test": FakeResponse(CSV),
+    })
+    hosts = HostPool([PRIMARY, MIRROR])
+    df = fetch_source("MODIS_NRT", "KEY", BBOX, 1, hosts)
+    assert len(df) == 1
+    assert calls.count("primary.test") == ff.RETRIES, "5xx should exhaust retries"
+    print(f"  5xx: primary retried {ff.RETRIES}x then mirror served the data")
+
+
+class _Rc:
+    value = None
+
+
+@contextlib.contextmanager
+def outage_main(gj_path, meta_path, live_gj, live_meta, origin, age_min):
+    """Run main() with every FIRMS host refusing the connection.
+
+    Points the module's output paths at a temp dir and stubs the live-feed
+    read, so the test observes exactly what the workflow's publish step would
+    ship from data/live.
+    """
+    stub_requests({"primary.test": requests.ConnectionError(),
+                   "mirror.test": requests.ConnectionError()})
+    saved = (ff.LIVE_GEOJSON, ff.LIVE_METADATA, ff.FIRMS_AREA_APIS,
+             load_mod.load_live_detections,
+             os.environ.get(ff.FIRMS_MAP_KEY_ENV))
+    ff.LIVE_GEOJSON, ff.LIVE_METADATA = gj_path, meta_path
+    ff.FIRMS_AREA_APIS = [PRIMARY, MIRROR]
+    load_mod.load_live_detections = lambda: (
+        live_gj, live_meta,
+        {"origin": origin, "age_minutes": age_min, "available": True},
+    )
+    os.environ[ff.FIRMS_MAP_KEY_ENV] = "TESTKEY"
+    rc = _Rc()
+    try:
+        rc.value = ff.main()
+        yield rc
+    finally:
+        (ff.LIVE_GEOJSON, ff.LIVE_METADATA, ff.FIRMS_AREA_APIS,
+         load_mod.load_live_detections, prev_key) = saved
+        if prev_key is None:
+            os.environ.pop(ff.FIRMS_MAP_KEY_ENV, None)
+        else:
+            os.environ[ff.FIRMS_MAP_KEY_ENV] = prev_key
+
+
+def check_outage_republishes_live_feed(tmp):
+    """A tolerated outage must leave real detections in data/live.
+
+    Regression test for the placeholder clobber: main() used to exit 0 without
+    writing anything, so the workflow's publish step force-pushed whatever the
+    CI checkout happened to hold -- the placeholder committed to main -- over a
+    live feed. Observed in production runs #218, #245 and #314.
+    """
+    live_gj = {"type": "FeatureCollection",
+               "features": [{"type": "Feature", "properties": {"source": "x"},
+                             "geometry": {"type": "Point", "coordinates": [0, 0]}}]}
+    live_meta = {"generated_utc": "2026-01-01T00:00:00Z", "total_detections": 1}
+
+    gj_path, meta_path = tmp / "g.geojson", tmp / "m.json"
+    # The placeholder is what a fresh CI checkout starts with.
+    gj_path.write_text(json.dumps({"type": "FeatureCollection", "features": [],
+                                   "properties": {"status": "awaiting first "
+                                                  "scheduled refresh"}}))
+    meta_path.write_text(json.dumps({"generated_utc": None}))
+
+    with outage_main(gj_path, meta_path, live_gj, live_meta,
+                     "live-data branch", 132.0) as rc:
+        pass
+
+    assert rc.value == 0, f"a 132-min-old feed should be tolerated, got {rc.value}"
+    published = json.loads(gj_path.read_text())
+    assert published["features"], "publish would have shipped the placeholder"
+    assert json.loads(meta_path.read_text())["total_detections"] == 1
+    print("  outage: live feed re-published intact, placeholder not shipped")
+
+
+def check_outage_without_branch_fails(tmp):
+    """If the live branch is unreadable there is nothing safe to re-publish,
+    so the run must fail and let the publish step be skipped."""
+    gj_path, meta_path = tmp / "g2.geojson", tmp / "m2.json"
+    gj_path.write_text('{"type":"FeatureCollection","features":[]}')
+    meta_path.write_text("{}")
+
+    with outage_main(gj_path, meta_path, {}, {}, "local file", 10.0) as rc:
+        pass
+
+    assert rc.value == 1, f"local-file origin must not be published, got {rc.value}"
+    print("  outage: local-only origin fails the run instead of publishing it")
+
+
+def check_transform():
+    """Parsing, confidence, dedup and GeoJSON, against real archive rows."""
     raw = load_sample()
     print(f"  loaded {len(raw):,} archive rows")
 
@@ -58,6 +271,38 @@ def main():
     assert "SECRET123" not in _redact("failed with key SECRET123 oops", "SECRET123")
     assert "REDACTED" in _redact("key=SECRET123", "SECRET123")
     print("  MAP_KEY redaction: ok")
+
+
+def main():
+    print("FIRMS pipeline self-test (no MAP_KEY required)")
+
+    # The archive CSV is a large gitignored download, so it is absent in a
+    # fresh clone and in CI. Skip that section rather than fail; the failover
+    # checks below need no fixture and must still run.
+    print("\nTransform pipeline")
+    if ARCHIVE.exists():
+        check_transform()
+    else:
+        print(f"  SKIPPED: {ARCHIVE.name} not present "
+              f"(run src/ingest/firms_archive.py to fetch it)")
+
+    # Host failover, against a stubbed transport. Backoff sleeps are skipped so
+    # the suite does not spend a minute waiting on deliberate failures.
+    real_get, real_sleep = ff.requests.get, ff.time.sleep
+    ff.time.sleep = lambda _s: None
+    try:
+        print("\nHost failover")
+        check_failover()
+        check_dead_host_probed_once()
+        check_bad_key_does_not_fail_over()
+        check_5xx_fails_over()
+
+        print("\nOutage handling")
+        with tempfile.TemporaryDirectory() as d:
+            check_outage_republishes_live_feed(Path(d))
+            check_outage_without_branch_fails(Path(d))
+    finally:
+        ff.requests.get, ff.time.sleep = real_get, real_sleep
 
     print("\n  ALL CHECKS PASSED")
 

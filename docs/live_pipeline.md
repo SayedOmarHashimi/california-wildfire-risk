@@ -88,12 +88,22 @@ python -m tests.test_firms_pipeline
    | Situation | Publish | Exit | Rationale |
    |---|---|---|---|
    | Some sources fail | yes, with the rest | 0 | Partial data beats none |
-   | All fail, published data < 3 h old | skipped | 0 | Transient outage; good data intact |
+   | All fail, published data < 3 h old, live branch readable | yes, re-publishing the live feed unchanged | 0 | Transient outage; good data preserved |
+   | All fail, published data < 3 h old, live branch unreadable | skipped | 1 | Nothing safe to re-publish |
    | All fail, published data ≥ 3 h old | skipped | 1 | Now worth an alert |
    | Any 4xx (bad key, bad request) | skipped | 1 | Config error, never self-heals |
+   | Primary host down, mirror up | yes, from the mirror | 0 | Failover; see below |
 
-   The publish step is skipped whenever the fetch fails, so a failed run can
-   never overwrite good data with nothing.
+   The publish step is skipped only when the fetch exits non-zero. **Exiting 0
+   always publishes**, and it publishes whatever is in `data/live` in the
+   runner's checkout — which on a fresh clone is the placeholder committed to
+   `main`, not the feed currently live. So the tolerated-outage path must write
+   the live feed back to `data/live` before exiting 0; otherwise a tolerated
+   outage replaces real detections with `awaiting first scheduled refresh`.
+   That is not hypothetical: it happened in runs #218 (2026-09-06), #245
+   (09-09) and #314 (09-19), each time serving an empty map for hours. If the
+   live branch cannot be read there is nothing safe to re-publish, so the run
+   fails instead, which skips publish and leaves the branch untouched.
 
    Transient errors (connection failures, 5xx) are retried three times with
    backoff. 4xx errors are **not** retried — they will not succeed on a second
@@ -102,6 +112,25 @@ python -m tests.test_firms_pipeline
 
    Timeouts are (15 s connect, 60 s read). A flat 120 s previously meant one
    outage consumed 8 minutes of runner time waiting on a dead host.
+
+   **Host failover.** All four sources are served by one hostname, so a
+   host-level outage takes every source down at once — that is what the
+   2026-08-31 run showed, four sources failing identically with
+   `ConnectionError`. Two things follow from that:
+
+   - NASA publishes `firms2.modaps.eosdis.nasa.gov` as the alternate during
+     FIRMS maintenance, so it is tried before the run gives up. A primary-only
+     outage now refreshes normally instead of failing. `firms_host` in the
+     metadata records which host served the data.
+   - A host that fails at the connection or 5xx level is retired for the rest
+     of the run, so the remaining sources fail immediately rather than each
+     rediscovering the same outage. Four sources × three attempts × a 15 s
+     connect timeout was minutes of a ten-minute job spent waiting on a host
+     already known to be down; a total outage now costs six HTTP attempts
+     instead of twenty-four.
+
+   A 4xx is never failed over — a rejected `MAP_KEY` is rejected on the mirror
+   too, and retrying there would disguise a config error as an outage.
 
    The distinction between transient and permanent matters: tolerating a 4xx
    because the published data still looked fresh would hide a broken key until

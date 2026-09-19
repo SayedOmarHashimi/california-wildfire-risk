@@ -306,6 +306,7 @@ its wind driver is modeled rather than measured.
 |---|---|
 | Source | NASA FIRMS (VIIRS S-NPP / NOAA-20, MODIS), near-real-time |
 | Endpoint | `https://firms.modaps.eosdis.nasa.gov/api/area/csv` |
+| Alternate endpoint | `https://firms2.modaps.eosdis.nasa.gov/api/area/csv` — NASA's documented mirror, used automatically if the primary host is unreachable |
 | Auth | Free `MAP_KEY`, supplied via the `FIRMS_MAP_KEY` env var / GitHub secret — **never committed** |
 | Planned output | `data/live/firms_california_active.geojson` |
 | Refresh | GitHub Actions cron, every 15 minutes |
