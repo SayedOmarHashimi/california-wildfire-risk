@@ -8,7 +8,11 @@ rows, and the host-failover logic is exercised against a stubbed requests.get.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import tempfile
+from pathlib import Path
 
 import pandas as pd
 
@@ -16,6 +20,7 @@ import requests
 
 from src.config import RAW
 import src.live.fetch_firms as ff
+import src.live.load as load_mod
 from src.live.fetch_firms import HostPool, fetch_source, normalise, to_geojson, _redact
 
 ARCHIVE = RAW / "firms_viirs_snpp_2018_us.csv"
@@ -149,6 +154,88 @@ def check_5xx_fails_over():
     print(f"  5xx: primary retried {ff.RETRIES}x then mirror served the data")
 
 
+class _Rc:
+    value = None
+
+
+@contextlib.contextmanager
+def outage_main(gj_path, meta_path, live_gj, live_meta, origin, age_min):
+    """Run main() with every FIRMS host refusing the connection.
+
+    Points the module's output paths at a temp dir and stubs the live-feed
+    read, so the test observes exactly what the workflow's publish step would
+    ship from data/live.
+    """
+    stub_requests({"primary.test": requests.ConnectionError(),
+                   "mirror.test": requests.ConnectionError()})
+    saved = (ff.LIVE_GEOJSON, ff.LIVE_METADATA, ff.FIRMS_AREA_APIS,
+             load_mod.load_live_detections,
+             os.environ.get(ff.FIRMS_MAP_KEY_ENV))
+    ff.LIVE_GEOJSON, ff.LIVE_METADATA = gj_path, meta_path
+    ff.FIRMS_AREA_APIS = [PRIMARY, MIRROR]
+    load_mod.load_live_detections = lambda: (
+        live_gj, live_meta,
+        {"origin": origin, "age_minutes": age_min, "available": True},
+    )
+    os.environ[ff.FIRMS_MAP_KEY_ENV] = "TESTKEY"
+    rc = _Rc()
+    try:
+        rc.value = ff.main()
+        yield rc
+    finally:
+        (ff.LIVE_GEOJSON, ff.LIVE_METADATA, ff.FIRMS_AREA_APIS,
+         load_mod.load_live_detections, prev_key) = saved
+        if prev_key is None:
+            os.environ.pop(ff.FIRMS_MAP_KEY_ENV, None)
+        else:
+            os.environ[ff.FIRMS_MAP_KEY_ENV] = prev_key
+
+
+def check_outage_republishes_live_feed(tmp):
+    """A tolerated outage must leave real detections in data/live.
+
+    Regression test for the placeholder clobber: main() used to exit 0 without
+    writing anything, so the workflow's publish step force-pushed whatever the
+    CI checkout happened to hold -- the placeholder committed to main -- over a
+    live feed. Observed in production runs #218, #245 and #314.
+    """
+    live_gj = {"type": "FeatureCollection",
+               "features": [{"type": "Feature", "properties": {"source": "x"},
+                             "geometry": {"type": "Point", "coordinates": [0, 0]}}]}
+    live_meta = {"generated_utc": "2026-01-01T00:00:00Z", "total_detections": 1}
+
+    gj_path, meta_path = tmp / "g.geojson", tmp / "m.json"
+    # The placeholder is what a fresh CI checkout starts with.
+    gj_path.write_text(json.dumps({"type": "FeatureCollection", "features": [],
+                                   "properties": {"status": "awaiting first "
+                                                  "scheduled refresh"}}))
+    meta_path.write_text(json.dumps({"generated_utc": None}))
+
+    with outage_main(gj_path, meta_path, live_gj, live_meta,
+                     "live-data branch", 132.0) as rc:
+        pass
+
+    assert rc.value == 0, f"a 132-min-old feed should be tolerated, got {rc.value}"
+    published = json.loads(gj_path.read_text())
+    assert published["features"], "publish would have shipped the placeholder"
+    assert json.loads(meta_path.read_text())["total_detections"] == 1
+    print("  outage: live feed re-published intact, placeholder not shipped")
+
+
+def check_outage_without_branch_fails(tmp):
+    """If the live branch is unreadable there is nothing safe to re-publish,
+    so the run must fail and let the publish step be skipped."""
+    gj_path, meta_path = tmp / "g2.geojson", tmp / "m2.json"
+    gj_path.write_text('{"type":"FeatureCollection","features":[]}')
+    meta_path.write_text("{}")
+
+    with outage_main(gj_path, meta_path, {}, {}, "local file", 10.0) as rc:
+        pass
+
+    assert rc.value == 1, f"local-file origin must not be published, got {rc.value}"
+    print("  outage: local-only origin fails the run instead of publishing it")
+
+
 def check_transform():
     """Parsing, confidence, dedup and GeoJSON, against real archive rows."""
     raw = load_sample()
@@ -209,6 +296,11 @@ def main():
         check_dead_host_probed_once()
         check_bad_key_does_not_fail_over()
         check_5xx_fails_over()
+
+        print("\nOutage handling")
+        with tempfile.TemporaryDirectory() as d:
+            check_outage_republishes_live_feed(Path(d))
+            check_outage_without_branch_fails(Path(d))
     finally:
         ff.requests.get, ff.time.sleep = real_get, real_sleep
 

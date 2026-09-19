@@ -323,16 +323,42 @@ def main() -> int:
         # Otherwise decide based on how old the published data actually is.
         try:
             from src.live.load import load_live_detections
-            _, _, live_status = load_live_detections()
+            live_gj, live_meta, live_status = load_live_detections()
             age_min = live_status.get("age_minutes")
         except Exception:
+            live_gj = live_meta = None
+            live_status = {}
             age_min = None
 
-        if age_min is not None and age_min < TOLERATE_FAILURE_IF_FRESHER_THAN_H * 60:
+        # Tolerating the outage means the publish step still runs, and that step
+        # ships whatever is in data/live -- which in a fresh CI checkout is the
+        # placeholder committed to main, not the feed that is currently live.
+        # Exiting 0 without writing the published feed back therefore replaces
+        # real detections with "awaiting first scheduled refresh". Only the
+        # remote branch is worth preserving: a local file is either already
+        # identical to what publish would ship, or is that same placeholder.
+        from_branch = live_status.get("origin") == "live-data branch"
+
+        if (age_min is not None
+                and age_min < TOLERATE_FAILURE_IF_FRESHER_THAN_H * 60
+                and from_branch):
+            LIVE_GEOJSON.parent.mkdir(parents=True, exist_ok=True)
+            LIVE_GEOJSON.write_text(json.dumps(live_gj, separators=(",", ":")))
+            LIVE_METADATA.write_text(json.dumps(live_meta, indent=2))
             print(f"Published data is {age_min:.0f} min old (< "
                   f"{TOLERATE_FAILURE_IF_FRESHER_THAN_H} h); treating this as a "
-                  f"transient outage and exiting 0.", file=sys.stderr)
+                  f"transient outage and re-publishing it unchanged, exiting 0.",
+                  file=sys.stderr)
             return 0
+        if age_min is not None and not from_branch:
+            # Fresh enough to tolerate, but we could not read the live branch,
+            # so we have nothing safe to re-publish. Failing skips the publish
+            # step, which leaves the live branch exactly as it is.
+            print(f"Published data is {age_min:.0f} min old but was read from "
+                  f"{live_status.get('origin')!r}, not the live-data branch; "
+                  f"failing rather than risk publishing placeholder data.",
+                  file=sys.stderr)
+            return 1
         print(f"Published data age: "
               f"{'unknown' if age_min is None else f'{age_min:.0f} min'}. "
               f"Failing the run so the outage is visible.", file=sys.stderr)
