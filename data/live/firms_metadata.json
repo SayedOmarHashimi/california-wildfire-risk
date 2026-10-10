@@ -1,0 +1,36 @@
+{
+  "generated_utc": "2026-10-10T14:45:58Z",
+  "total_detections": 53,
+  "vegetation_fire_detections": 53,
+  "day_range": 1,
+  "bbox": [
+    -124.48,
+    32.53,
+    -114.13,
+    42.01
+  ],
+  "sources": {
+    "VIIRS_SNPP_NRT": {
+      "ok": true,
+      "rows": 17
+    },
+    "VIIRS_NOAA20_NRT": {
+      "ok": true,
+      "rows": 23
+    },
+    "VIIRS_NOAA21_NRT": {
+      "ok": true,
+      "rows": 14
+    },
+    "MODIS_NRT": {
+      "ok": true,
+      "rows": 1
+    }
+  },
+  "confidence_mix": {
+    "nominal": 53
+  },
+  "latest_detection_utc": "2026-10-10T12:19:00Z",
+  "data_is_unverified": true,
+  "not_an_official_source": true
+}
